@@ -1,4 +1,3 @@
-
 #include "HttpData.h"
 #include <iostream>
 #include "Logging.h"
