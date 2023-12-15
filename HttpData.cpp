@@ -2,6 +2,9 @@
 #include <iostream>
 #include "Logging.h"
 #include "EventLoop.h"
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 using namespace std;
 
 pthread_once_t MimeType::once_control = PTHREAD_ONCE_INIT;
@@ -1179,4 +1182,136 @@ HeaderState HttpData::parseHeaders()
     */
     str = str.substr(now_read_line_begin);
     return PARSE_HEADER_AGAIN;
+}
+/*
+1."HTTP/1.1 200 OK\r\n"
+2.Connection: Keep-Alive\r\n
+3.如果类型是Hello：
+"HTTP/1.1 200 OK\r\nContent-type: text/plain\r\n\r\nHello World";
+4.如果类型是favicon.ico
+5.如果是其他类型：
+"Content-Type: "
+Content-Length:
+*/
+
+AnalysisState HttpData::analysisRequest()
+{
+    if (method_ == METHOD_POST)
+    {
+    }
+    else if (method_ == METHOD_GET || method_ == METHOD_HEAD)
+    {
+        string header;
+        header += "HTTP/1.1 200 OK\r\n";
+        if (headers_.find("Connection") != headers_.end() && (headers_["Connection"] == "keep-Alive" || headers_["Connection"] == "keep-alive"))
+        {
+            keepAlive_ = true;
+            header += string("Connection: Keep-Alive\r\n") + "Keep-Alive: timeout" + to_string(DEFAULT_KEEP_ALIVE_TIME) + "\r\n";
+        }
+        // 后缀名
+        int dot_pos = fileName_.find('.');
+        string filetype;
+        if (dot_pos < 0)
+        {
+            filetype = MimeType::getMime("default");
+        }
+        else
+        {
+            filetype = MimeType::getMime(fileName_.substr(dot_pos));
+        }
+        if (fileName_ == "hello")
+        {
+            outBuffer_ = "HTTP/1.1 200 OK\r\nContent-type: text/plain\r\n\r\nHello World";
+            return ANALYSIS_SUCCESS;
+        }
+        if (fileName_ == "favicon.ico")
+        {
+            header += "Content-Type: image/png\r\n";
+            header += "Content-Length " + to_string(sizeof favicon) + "\r\n";
+            header += "Server: Summer Web Server\r\n";
+            header += "\r\n";
+            outBuffer_ += header;
+            outBuffer_ += string(favicon, favicon + sizeof favicon);
+            return ANALYSIS_SUCCESS;
+        }
+        /*用于存储文件或文件系统对象的元数据信息*/
+        struct stat sbuf;
+        /*把filename_这个文件储存在sbuf中*/
+        if (stat(fileName_.c_str(), &sbuf) < 0)
+        {
+            header.clear();
+            handleError(fd_, 404, "Not Found!");
+            return ANALYSIS_ERROR;
+        }
+        header += "Content-Type: " + filetype + "\r\n";
+        header += "Content-Length:" + to_string(sbuf.st_size) + "\r\n";
+        header += "Server: summer Web Server\r\n";
+        outBuffer_ += header;
+
+        if (method_ == METHOD_HEAD)
+            return ANALYSIS_SUCCESS;
+        int src_fd = open(fileName_.c_str(), O_RDONLY, 0);
+        if (src_fd < 0)
+        {
+            outBuffer_.clear();
+            handleError(fd_, 404, "Not Found!");
+            return ANALYSIS_ERROR;
+        }
+        /*综上所述，这段代码通过 mmap() 函数将一个已打开的文件映射到内存中，并赋值给 mmapRet 变量。映射完成后，可以通过 mmapRet 指针来访问内存中的文件内容。
+        PROT_READ: 参数指定了映射区域的访问权限，这里表示映射区域可读。
+        MAP_PRIVATE: 参数标志着映射区域的私有性，即对映射区域的写入操作不会影响原文件。映射后的更改对其它进程也不可见。*/
+        void *mmapRet = mmap(NULL, sbuf.st_size, PROT_READ, MAP_PRIVATE, src_fd, 0);
+        close(src_fd);
+        if (mmapRet == (void *)-1)
+        {
+            /*在内存映射失败的情况下，这行代码调用 munmap() 函数来取消映射，释放之前映射的内存区域。*/
+            munmap(mmapRet, sbuf.st_size);
+            outBuffer_.clear();
+            handleError(fd_, 404, "Not Found!");
+            return ANALYSIS_ERROR;
+        }
+        char *src_addr = static_cast<char *>(mmapRet);
+        outBuffer_ += string(src_addr, src_addr + sbuf.st_size);
+        munmap(mmapRet, sbuf.st_size);
+        return ANALYSIS_SUCCESS;
+    }
+    return ANALYSIS_ERROR;
+}
+
+void HttpData::handleError(int fd, int err_num, string short_msg)
+{
+    short_msg = " " + short_msg;
+    char send_buff[4096];
+    string body_buff, header_buff;
+    body_buff += "<html><title>出错了</title>";
+    body_buff += "<body bgcolor=\"ffffff\">";
+    body_buff += to_string(err_num) + short_msg;
+    body_buff += "<hr><em> Summer Web Server</em>\n</body></html>";
+
+    header_buff += "HTTP/1.1" + to_string(err_num) + short_msg + "\r\n";
+    header_buff += "Content-Type: text/html\r\n";
+    header_buff += "Connection: Close\r\n";
+    header_buff += "Content-Length: " + to_string(body_buff.size()) + "\r\n";
+    header_buff += "Server: Summer Web Server\r\n";
+    header_buff += "\r\n";
+    // 错误处理不考虑writen不完的情况
+    /*sprintf 函数将格式化后的字符串写入 send_buff 缓冲区中。*/
+    sprintf(send_buff, "%s", header_buff.c_str());
+    /*writen 函数用于将数据写入文件描述符所代表的文件或套接字中*/
+    writen(fd, send_buff, strlen(send_buff));
+    sprintf(send_buff, "%s", body_buff.c_str());
+    writen(fd, send_buff, strlen(send_buff));
+}
+
+void HttpData::handleClose()
+{
+    connectionState_ = H_DISCONNECTED;
+    shared_ptr<HttpData> guard(shared_from_this());
+    loop_->removeFromPoller(channel_);
+}
+
+void HttpData::newEvent()
+{
+    channel_->setEvents(DEFAULT_EVENT);
+    loop_->addToPoller(channel_, DEFAULT_EXPIRED_TIME);
 }

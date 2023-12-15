@@ -55,8 +55,7 @@ void AsyncLogging::threadFunc()
         // 如果buffersToWrite为空，则交换buffers_
         assert(buffersToWrite.empty());
         {
-            
-            
+
             MutexLockGuard lock(mutex_);
             if (buffers_.empty())
             {
